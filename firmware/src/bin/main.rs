@@ -54,10 +54,11 @@ where
 #[rtic::app(device = clock_frequency_measurement::hal::stm32, peripherals = true)]
 mod app {
     use super::hal;
+    use hal::exti::Event;
     use hal::gpio::gpiob::PB0;
-    use hal::gpio::{GpioExt, Output, PushPull};
+    use hal::gpio::{GpioExt, Output, PushPull, SignalEdge};
     use hal::prelude::*;
-    use hal::rcc::{Enable, RccExt, Reset};
+    use hal::rcc::RccExt;
     use hal::stm32;
     use hal::timer::{Timer, TimerExt};
 
@@ -72,6 +73,7 @@ mod app {
         timer_1hz: Timer<stm32::TIM16>,
         led: PB0<Output<PushPull>>,
         timer_core: stm32::TIM14,
+        exti: stm32::EXTI,
     }
 
     #[init]
@@ -82,12 +84,14 @@ mod app {
         defmt::println!("Measuring clock frequency ...");
 
         // Initialize GPIOs
+        let mut exti = ctx.device.EXTI;
         let mut rcc = ctx.device.RCC.constrain();
-        let gpiob = ctx.device.GPIOB.split(&mut rcc);
         let gpioa = ctx.device.GPIOA.split(&mut rcc);
+        let gpiob = ctx.device.GPIOB.split(&mut rcc);
         let led = gpiob.pb0.into_push_pull_output();
         let i2c_sda = gpioa.pa12.into_open_drain_output();
         let i2c_scl = gpioa.pa11.into_open_drain_output();
+        let ds3231_int = gpioa.pa0.into_pull_up_input();
 
         // Initialize timers
         let mut timer_1hz = ctx.device.TIM16.timer(&mut rcc);
@@ -103,13 +107,18 @@ mod app {
                 .I2C2
                 .i2c(i2c_sda, i2c_scl, hal::i2c::Config::new(100.khz()), &mut rcc);
 
+        // Initialize DS3231
         super::configure_ds3231(&mut i2c);
+
+        // Configure DS3231 1Hz pin as external trigger
+        ds3231_int.listen(SignalEdge::Falling, &mut exti);
 
         (
             SharedResources {
                 timer_core,
                 timer_1hz,
                 led,
+                exti,
             },
             LocalResources {
                 core_time_prev_actual: 0,
@@ -119,10 +128,10 @@ mod app {
         )
     }
 
-    #[task(binds = TIM16, shared = [led, timer_1hz, timer_core], local = [core_time_prev_expected])]
+    #[task(binds = TIM16, shared = [timer_1hz, timer_core], local = [core_time_prev_expected])]
     fn measure_expected(mut ctx: measure_expected::Context) {
         ctx.shared.timer_1hz.lock(|timer| timer.clear_irq());
-        ctx.shared.led.lock(|led| led.toggle().unwrap());
+        // ctx.shared.led.lock(|led| led.toggle().unwrap());
 
         let core_time = ctx
             .shared
@@ -132,31 +141,28 @@ mod app {
         let (core_time_diff, _) = core_time.overflowing_sub(*ctx.local.core_time_prev_expected);
         *ctx.local.core_time_prev_expected = core_time;
 
-        defmt::println!(
+        defmt::debug!(
             "Expected: {}.{:03} MHz",
             core_time_diff / 1000,
             core_time_diff % 1000
         );
     }
 
-    #[task(binds = TIM14, shared = [led, timer_1hz, timer_core], local = [core_time_prev_actual])]
+    #[task(binds = EXTI0_1, shared = [led, timer_core, exti], local = [core_time_prev_actual])]
     fn measure_actual(mut ctx: measure_actual::Context) {
-        // ctx.shared.timer_1hz.lock(|timer| timer.clear_irq());
+        ctx.shared.exti.lock(|exti| exti.unpend(Event::GPIO0));
+        ctx.shared.led.lock(|led| led.toggle().unwrap());
 
-        // ctx.shared.led.lock(|led| led.toggle().unwrap());
+        let core_time = ctx
+            .shared
+            .timer_core
+            .lock(|timer| timer.cnt.read().cnt().bits());
 
-        // let rel_time = ctx
-        //     .shared
-        //     .rel_timer
-        //     .lock(|timer| timer.cnt.read().cnt().bits());
+        let core_time_diff = core_time
+            .overflowing_sub(*ctx.local.core_time_prev_actual)
+            .0;
+        *ctx.local.core_time_prev_actual = core_time;
 
-        // let rel_time_diff = rel_time.overflowing_sub(*ctx.local.rel_time_prev_actual).0;
-        // *ctx.local.rel_time_prev_actual = rel_time;
-
-        // defmt::println!(
-        //     "Actual: {}.{:03} MHz",
-        //     rel_time_diff / 1000,
-        //     rel_time_diff % 1000
-        // );
+        defmt::println!("{}.{:03} MHz", core_time_diff / 1000, core_time_diff % 1000);
     }
 }
