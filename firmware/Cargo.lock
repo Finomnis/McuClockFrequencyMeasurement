@@ -81,6 +81,7 @@ dependencies = [
  "cortex-m-rtic",
  "defmt",
  "defmt-rtt",
+ "embedded-hal",
  "panic-probe",
  "stm32g0xx-hal",
 ]

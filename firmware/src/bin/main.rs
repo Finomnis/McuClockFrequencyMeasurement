@@ -22,6 +22,35 @@ fn configure_core_timer(timer_core: stm32::TIM14, rcc: &mut hal::rcc::Rcc) -> st
     timer_core
 }
 
+fn configure_ds3231<I2C>(i2c: &mut I2C)
+where
+    I2C: embedded_hal::blocking::i2c::Write + embedded_hal::blocking::i2c::WriteRead,
+{
+    defmt::info!("Enabling 1Hz output of DS3231 clock chip ...");
+    if let Err(_) = i2c.write(0x68, &[0x0e, 0b00011000]) {
+        panic!("Unable to enable 1Hz output of DS3231!");
+    }
+
+    let mut buf = [0u8; 0x13];
+    if let Err(_) = i2c.write_read(0x68, &[0], &mut buf) {
+        panic!("Unable to read from DS3231!");
+    };
+
+    // for (addr, val) in buf.iter().enumerate() {
+    //     defmt::println!("{:02x}h: {:08b}", addr, val);
+    // }
+
+    if (buf[0x0e] & 0b00000100) != 0 {
+        panic!("DS3231 1Hz output was not enabled successfully!");
+    }
+
+    defmt::info!(
+        "DS3231 Temperature: {}.{:02} C",
+        buf[0x11],
+        (buf[0x12] >> 6) * 25
+    );
+}
+
 #[rtic::app(device = clock_frequency_measurement::hal::stm32, peripherals = true)]
 mod app {
     use super::hal;
@@ -57,8 +86,8 @@ mod app {
         let gpiob = ctx.device.GPIOB.split(&mut rcc);
         let gpioa = ctx.device.GPIOA.split(&mut rcc);
         let led = gpiob.pb0.into_push_pull_output();
-        let i2c_sda = gpioa.pa10.into_open_drain_output();
-        let i2c_scl = gpioa.pa9.into_open_drain_output();
+        let i2c_sda = gpioa.pa12.into_open_drain_output();
+        let i2c_scl = gpioa.pa11.into_open_drain_output();
 
         // Initialize timers
         let mut timer_1hz = ctx.device.TIM16.timer(&mut rcc);
@@ -71,8 +100,10 @@ mod app {
         // Initialize I2C
         let mut i2c =
             ctx.device
-                .I2C1
+                .I2C2
                 .i2c(i2c_sda, i2c_scl, hal::i2c::Config::new(100.khz()), &mut rcc);
+
+        super::configure_ds3231(&mut i2c);
 
         (
             SharedResources {
